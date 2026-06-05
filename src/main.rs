@@ -14,13 +14,14 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{debug, error, info};
 
-use crate::album_art::AlbumArtClient;
+use crate::album_art::{AlbumArtClient, LocalArtClient};
 use crate::config::DisplayType as ConfigDisplayType;
 use crate::mpd_conn::get_timestamp;
 use config::Config;
 
 mod album_art;
 mod config;
+mod image_uploader;
 mod mpd_conn;
 
 pub const IDLE_TIME: u64 = 3;
@@ -132,7 +133,7 @@ enum ServiceEvent {
 
 struct Service<'a> {
     config: &'a Config,
-    album_art_client: AlbumArtClient,
+    remote_client: AlbumArtClient,
     drpc: DiscordClient,
     tokens: Tokens,
 }
@@ -184,10 +185,11 @@ impl<'a> Service<'a> {
         })
         .persist();
 
-        let album_art_client = AlbumArtClient::new();
+        let remote_client = AlbumArtClient::new();
+
         Self {
             config,
-            album_art_client,
+            remote_client,
             drpc,
             tokens,
         }
@@ -254,7 +256,44 @@ impl<'a> Service<'a> {
 
                 let timestamps = get_timestamp(status, format.timestamp);
 
-                let url = self.album_art_client.get_album_art_url(song).await;
+                // Album art selection based on config mode
+                let url = match format.album_art {
+                    config::AlbumArtMode::None => None,
+                    config::AlbumArtMode::Remote => {
+                        self.remote_client.get_album_art_url(song.clone()).await
+                    }
+                    config::AlbumArtMode::Local => {
+                        if let Some(music_dir) = self.get_music_dir() {
+                            let local = LocalArtClient::new(music_dir);
+                            local.get_album_art_url(song.clone()).await
+                        } else {
+                            None
+                        }
+                    }
+                    config::AlbumArtMode::PreferLocal => {
+                        if let Some(music_dir) = self.get_music_dir() {
+                            let local = LocalArtClient::new(music_dir);
+                            if let Some(url) = local.get_album_art_url(song.clone()).await {
+                                Some(url)
+                            } else {
+                                self.remote_client.get_album_art_url(song.clone()).await
+                            }
+                        } else {
+                            self.remote_client.get_album_art_url(song.clone()).await
+                        }
+                    }
+                    config::AlbumArtMode::PreferRemote => {
+                        if let Some(url) = self.remote_client.get_album_art_url(song.clone()).await
+                        {
+                            Some(url)
+                        } else if let Some(music_dir) = self.get_music_dir() {
+                            let local = LocalArtClient::new(music_dir);
+                            local.get_album_art_url(song).await
+                        } else {
+                            None
+                        }
+                    }
+                };
 
                 let display_type = map_display_type(format.display_type);
 
@@ -314,7 +353,19 @@ impl<'a> Service<'a> {
             error!("Failed to clear activity: {why:?}");
         }
     }
+
+    fn get_music_dir(&self) -> Option<&str> {
+        self.config.music_directory.as_deref().or_else(|| {
+            let dir = &self.config.format.music_directory;
+            if dir.is_empty() {
+                None
+            } else {
+                Some(dir.as_str())
+            }
+        })
+    }
 }
+
 
 /// Extracts the formatting tokens from a formatting string
 fn get_tokens(re: &Regex, format_string: &str) -> Vec<String> {
@@ -325,16 +376,11 @@ fn get_tokens(re: &Regex, format_string: &str) -> Vec<String> {
 
 /// Replaces each of the formatting tokens in the formatting string
 /// with actual data pulled from MPD
-fn replace_tokens(
-    format_string: &str,
-    tokens: &Vec<String>,
-    song: &Song,
-    status: &Status,
-) -> String {
+fn replace_tokens(format_string: &str, tokens: &[String], song: &Song, status: &Status) -> String {
     let mut compiled_string = format_string.to_string();
     for token in tokens {
         let value = mpd_conn::get_token_value(song, status, token);
-        compiled_string = compiled_string.replace(format!("${token}").as_str(), value.as_str());
+        compiled_string = compiled_string.replace(&format!("${token}"), &value);
     }
     compiled_string
 }
