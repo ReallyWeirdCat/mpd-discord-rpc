@@ -72,8 +72,6 @@ pub struct Format {
     pub display_type: DisplayType,
     #[serde(default)]
     pub album_art: AlbumArtMode,
-    #[serde(default = "default_music_directory")]
-    pub music_directory: String,
     #[serde(default)]
     pub button1_text: String,
     #[serde(default)]
@@ -96,7 +94,6 @@ impl Default for Format {
             small_text: String::new(),
             display_type: DisplayType::default(),
             album_art: AlbumArtMode::default(),
-            music_directory: String::new(),
             button1_text: String::new(),
             button1_link: String::new(),
             button2_text: String::new(),
@@ -113,7 +110,7 @@ pub struct Config {
     pub hosts: Vec<String>,
     #[serde(default)]
     pub format: Format,
-    #[serde(default)]
+    #[serde(default = "default_music_directory")]
     pub music_directory: Option<String>,
 }
 
@@ -123,7 +120,7 @@ impl Default for Config {
             id: default_discord_id(),
             hosts: default_mpd_hosts(),
             format: Format::default(),
-            music_directory: None,
+            music_directory: default_music_directory(),
         }
     }
 }
@@ -163,13 +160,9 @@ fn default_mpd_hosts() -> Vec<String> {
     vec!["localhost:6600".to_string()]
 }
 
-fn default_music_directory() -> String {
-    // /home/user/Music
+fn default_music_directory() -> Option<String> {
     dirs::home_dir()
-        .map(|home| {
-            home.join("Music")
-                .to_string_lossy()
-                .into_owned()
-        })
-        .unwrap_or_else(|| String::new())
+        .map(|home| home.join("Music").to_string_lossy().into_owned())
+        .map(Some)
+        .unwrap_or(None)
 }

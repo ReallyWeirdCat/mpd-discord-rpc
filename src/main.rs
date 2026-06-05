@@ -355,17 +355,9 @@ impl<'a> Service<'a> {
     }
 
     fn get_music_dir(&self) -> Option<&str> {
-        self.config.music_directory.as_deref().or_else(|| {
-            let dir = &self.config.format.music_directory;
-            if dir.is_empty() {
-                None
-            } else {
-                Some(dir.as_str())
-            }
-        })
+        self.config.music_directory.as_deref()
     }
 }
-
 
 /// Extracts the formatting tokens from a formatting string
 fn get_tokens(re: &Regex, format_string: &str) -> Vec<String> {
