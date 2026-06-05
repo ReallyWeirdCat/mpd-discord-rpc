@@ -1,4 +1,3 @@
-use dirs;
 use serde::{Deserialize, Deserializer, Serialize};
 use universal_config::ConfigLoader;
 

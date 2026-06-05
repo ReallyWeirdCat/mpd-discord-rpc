@@ -77,24 +77,24 @@ impl ImageUploader {
         let client = Client::builder().user_agent(&ua).build().ok()?;
 
         // Try catbox.moe
-        if bytes.len() <= 200 * 1024 * 1024 {
-            if let Some(url) = Self::upload_to_catbox(&client, bytes, filename).await {
-                return Some(url);
-            }
+        if bytes.len() <= 200 * 1024 * 1024
+            && let Some(url) = Self::upload_to_catbox(&client, bytes, filename).await
+        {
+            return Some(url);
         }
 
         // Try uguu.se
-        if bytes.len() <= 128 * 1024 * 1024 {
-            if let Some(url) = Self::upload_to_uguu(&client, bytes, filename).await {
-                return Some(url);
-            }
+        if bytes.len() <= 128 * 1024 * 1024
+            && let Some(url) = Self::upload_to_uguu(&client, bytes, filename).await
+        {
+            return Some(url);
         }
 
         // Try tmpfiles.org
-        if bytes.len() <= 100 * 1024 * 1024 {
-            if let Some(url) = Self::upload_to_tmpfiles(&client, bytes, filename).await {
-                return Some(url);
-            }
+        if bytes.len() <= 100 * 1024 * 1024
+            && let Some(url) = Self::upload_to_tmpfiles(&client, bytes, filename).await
+        {
+            return Some(url);
         }
 
         None
@@ -203,10 +203,9 @@ fn extract_picture_from_file(path: &Path) -> Option<(Vec<u8>, String)> {
     let tag = tagged_file
         .primary_tag()
         .or_else(|| tagged_file.first_tag())?;
-    for picture in tag.pictures() {
-        let mime = picture.mime_type()?;
-        let mime_str = mime.as_str().to_string();
-        return Some((picture.data().to_vec(), mime_str));
-    }
-    None
+
+    let picture = tag.pictures().first()?;
+    let mime = picture.mime_type()?;
+    let mime_str = mime.as_str().to_string();
+    Some((picture.data().to_vec(), mime_str))
 }
