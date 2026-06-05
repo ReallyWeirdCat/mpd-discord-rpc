@@ -359,6 +359,7 @@ impl<'a> Service<'a> {
     }
 }
 
+
 /// Extracts the formatting tokens from a formatting string
 fn get_tokens(re: &Regex, format_string: &str) -> Vec<String> {
     re.captures_iter(format_string)
