@@ -47,6 +47,7 @@ impl ImageUploader {
                 return Some(url.clone());
             }
         }
+        debug!("Preparing to upload {}", path.display());
 
         let (bytes, mime) = spawn_blocking({
             let path = path.to_path_buf();
@@ -71,6 +72,7 @@ impl ImageUploader {
             .lock()
             .unwrap()
             .insert(path.to_path_buf(), url.clone());
+        debug!("Cached {} ({})", path.display(), url);
         Some(url)
     }
 

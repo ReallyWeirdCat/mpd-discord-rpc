@@ -134,6 +134,7 @@ enum ServiceEvent {
 struct Service<'a> {
     config: &'a Config,
     remote_client: AlbumArtClient,
+    local_client: LocalArtClient,
     drpc: DiscordClient,
     tokens: Tokens,
 }
@@ -186,10 +187,12 @@ impl<'a> Service<'a> {
         .persist();
 
         let remote_client = AlbumArtClient::new();
+        let local_client = LocalArtClient::new(config.music_directory.as_deref());
 
         Self {
             config,
             remote_client,
+            local_client,
             drpc,
             tokens,
         }
@@ -263,21 +266,11 @@ impl<'a> Service<'a> {
                         self.remote_client.get_album_art_url(song.clone()).await
                     }
                     config::AlbumArtMode::Local => {
-                        if let Some(music_dir) = self.get_music_dir() {
-                            let local = LocalArtClient::new(music_dir);
-                            local.get_album_art_url(song.clone()).await
-                        } else {
-                            None
-                        }
+                        self.local_client.get_album_art_url(song.clone()).await
                     }
                     config::AlbumArtMode::PreferLocal => {
-                        if let Some(music_dir) = self.get_music_dir() {
-                            let local = LocalArtClient::new(music_dir);
-                            if let Some(url) = local.get_album_art_url(song.clone()).await {
-                                Some(url)
-                            } else {
-                                self.remote_client.get_album_art_url(song.clone()).await
-                            }
+                        if let Some(url) = self.local_client.get_album_art_url(song.clone()).await {
+                            Some(url)
                         } else {
                             self.remote_client.get_album_art_url(song.clone()).await
                         }
@@ -286,11 +279,8 @@ impl<'a> Service<'a> {
                         if let Some(url) = self.remote_client.get_album_art_url(song.clone()).await
                         {
                             Some(url)
-                        } else if let Some(music_dir) = self.get_music_dir() {
-                            let local = LocalArtClient::new(music_dir);
-                            local.get_album_art_url(song).await
                         } else {
-                            None
+                            self.local_client.get_album_art_url(song).await
                         }
                     }
                 };
@@ -352,10 +342,6 @@ impl<'a> Service<'a> {
         } else if let Err(why) = self.drpc.clear_activity() {
             error!("Failed to clear activity: {why:?}");
         }
-    }
-
-    fn get_music_dir(&self) -> Option<&str> {
-        self.config.music_directory.as_deref()
     }
 }
 

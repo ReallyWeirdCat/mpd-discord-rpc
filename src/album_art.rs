@@ -180,20 +180,26 @@ impl AlbumArtClient {
 
 // Local album art client (extract from files and upload)
 pub struct LocalArtClient {
-    music_dir: PathBuf,
+    music_dir: Option<PathBuf>,
     uploader: ImageUploader,
 }
 
 impl LocalArtClient {
-    pub fn new(music_dir: &str) -> Self {
+    pub fn new(music_dir: Option<&str>) -> Self {
         Self {
-            music_dir: PathBuf::from(music_dir),
+            music_dir: music_dir.map(PathBuf::from),
             uploader: ImageUploader::new(),
         }
     }
 
     pub async fn get_album_art_url(&self, song: Song) -> Option<String> {
-        let file_path = self.music_dir.join(&song.url);
+        // If music_dir is None, return None immediately
+        let music_dir = match &self.music_dir {
+            Some(dir) => dir,
+            None => return None,
+        };
+
+        let file_path = music_dir.join(&song.url);
         if !file_path.exists() {
             tracing::debug!("Local file does not exist: {}", file_path.display());
             return None;

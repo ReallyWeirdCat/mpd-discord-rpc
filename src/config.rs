@@ -129,13 +129,22 @@ impl Config {
         let loader =
             ConfigLoader::new("discord-rpc").with_formats(&[universal_config::Format::Toml]);
 
-        loader.find_and_load().unwrap_or_else(|_| {
+        let mut cfg = loader.find_and_load().unwrap_or_else(|_| {
             let cfg = Self::default();
             loader
                 .save(&cfg, &universal_config::Format::Toml)
                 .expect("Failed to create default config file");
             cfg
-        })
+        });
+
+        // Clean up empty music directory parameter
+        if let Some(ref s) = cfg.music_directory
+            && s.trim().is_empty()
+        {
+            cfg.music_directory = None;
+        }
+
+        cfg
     }
 }
 
