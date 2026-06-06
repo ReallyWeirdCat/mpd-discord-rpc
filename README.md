@@ -135,16 +135,16 @@ button2_link = ""
 
 There are 5 modes that can be used to provide album art:
 
-- **none** - album art functionality is disabled
-- **local** - art from audio files is used
-- **remote** - art provided by Album Art Archive using MusicBrainz database
+- **none** - album art functionality is disabled.
+- **local** - art from audio files is used.
+- **remote** - art provided by Album Art Archive using MusicBrainz database.
 - **prefer_local** - priority given to local art.
 - **prefer_remote** (default) - priority given to remote art.
 
 In `local` mode album art is being pulled directly from local audiofiles and
 sent to image uploader services to obtain public links. This does not work when
 files are missing images or when the uploader services are unavailable. For
-stability and balancing purposes multiple services are used (catbox.moe,
+stability and balancing purposes multiple services are used (litterbox.catbox.moe,
 uguu.se and tmpfiles.org). Requires `music_directory` to be valid.
 
 In `remote` mode album art is pulled from the MusicBrainz database and Album
