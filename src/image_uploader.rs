@@ -171,7 +171,7 @@ impl ImageUploader {
         if json.status == "success" {
             json.data.map(|d| {
                 d.url
-                    .replace("http://tmpfiles.org/", "https://tmpfiles.org/dl/")
+                    .replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
             })
         } else {
             None
