@@ -96,7 +96,7 @@ impl ImageUploader {
 
         // Try tmpfiles.org
         if bytes.len() <= 100 * 1024 * 1024
-            && let Some(url) = Self::upload_to_tmpfiles(&client, bytes, filename).await
+            && let Some(url) = Self::upload_to_tmpfiles(&client, bytes, filename, "3600").await
         {
             return Some(url);
         }
@@ -169,28 +169,41 @@ impl ImageUploader {
         }
     }
 
-    async fn upload_to_tmpfiles(client: &Client, bytes: &[u8], filename: &str) -> Option<String> {
-        let form = Form::new().part(
-            "file",
-            Part::bytes(bytes.to_vec()).file_name(filename.to_string()),
-        );
+    async fn upload_to_tmpfiles(
+        client: &Client,
+        bytes: &[u8],
+        filename: &str,
+        time: &str,
+    ) -> Option<String> {
+        let form = Form::new()
+            .part(
+                "file",
+                Part::bytes(bytes.to_vec()).file_name(filename.to_string()),
+            )
+            .text("expire", time.to_string());
+
         let resp = client
             .post("https://tmpfiles.org/api/v1/upload")
             .multipart(form)
             .send()
             .await
             .ok()?;
+
         debug!("tmpfiles.org response: {:?}", resp);
+
         #[derive(Deserialize)]
         struct TmpResponse {
             status: String,
             data: Option<TmpData>,
         }
+
         #[derive(Deserialize)]
         struct TmpData {
             url: String,
         }
+
         let json: TmpResponse = resp.json().await.ok()?;
+
         if json.status == "success" {
             let url = json.data.map(|d| {
                 d.url
