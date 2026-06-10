@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use rand::seq::SliceRandom;
 use reqwest::Client;
@@ -11,9 +12,10 @@ use tokio::task::spawn_blocking;
 use tracing::debug;
 
 static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+const CACHE_DURATION: Duration = Duration::from_secs(3600);
 
 pub struct ImageUploader {
-    cache: Mutex<HashMap<PathBuf, String>>,
+    cache: Mutex<HashMap<PathBuf, (String, Instant)>>,
     user_agents: Vec<String>,
     current_ua: Mutex<usize>,
 }
@@ -40,13 +42,26 @@ impl ImageUploader {
     }
 
     pub async fn upload_local_file(&self, path: &Path) -> Option<String> {
-        {
-            let cache = self.cache.lock().unwrap();
-            if let Some(url) = cache.get(path) {
-                tracing::debug!("Cache hit for {}", path.display());
-                return Some(url.clone());
+        let cached_url = {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some((url, timestamp)) = cache.get(path) {
+                if timestamp.elapsed() < CACHE_DURATION {
+                    Some(url.clone())
+                } else {
+                    tracing::debug!("Removing {} from cache", path.display());
+                    cache.remove(path);
+                    None
+                }
+            } else {
+                None
             }
+        };
+
+        if let Some(url) = cached_url {
+            tracing::debug!("Cache hit for {}", path.display());
+            return Some(url);
         }
+
         debug!("Preparing to upload {}", path.display());
 
         let (bytes, mime) = spawn_blocking({
@@ -68,10 +83,12 @@ impl ImageUploader {
 
         let url = self.upload_bytes(&bytes, &filename).await?;
 
+        // Insert into cache with current time
         self.cache
             .lock()
             .unwrap()
-            .insert(path.to_path_buf(), url.clone());
+            .insert(path.to_path_buf(), (url.clone(), Instant::now()));
+
         debug!("Cached {} ({})", path.display(), url);
         Some(url)
     }
