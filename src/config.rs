@@ -4,10 +4,10 @@ use universal_config::ConfigLoader;
 #[derive(Serialize, Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AlbumArtMode {
+    #[default]
     Remote,
     Local,
     PreferLocal,
-    #[default]
     PreferRemote,
     None,
 }
