@@ -1,23 +1,47 @@
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rand::seq::SliceRandom;
 use reqwest::Client;
 use reqwest::multipart::{Form, Part};
 use serde::Deserialize;
 use tokio::task::spawn_blocking;
+use tokio::time::interval;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+static CACHE_FILENAME: &str = "mpd-discord-rpc-uploader.cache";
 const CACHE_DURATION: Duration = Duration::from_secs(3600);
+const PING_TIMEOUT: Duration = Duration::from_secs(5);
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(10);
+
+const UPLOADERS: &[(&str, u64)] = &[
+    ("litterbox", 200 * 1024 * 1024),
+    ("uguu", 128 * 1024 * 1024),
+    ("tmpfiles", 100 * 1024 * 1024),
+];
+
+#[derive(Debug, Clone)]
+struct UploaderHealth {
+    is_healthy: bool,
+    last_latency: Duration,
+}
+
+type HealthMap = Arc<Mutex<HashMap<String, UploaderHealth>>>;
 
 pub struct ImageUploader {
-    cache: Mutex<HashMap<PathBuf, (String, Instant)>>,
+    cache: Mutex<HashMap<PathBuf, (String, SystemTime)>>,
+    cache_file: PathBuf,
     user_agents: Vec<String>,
     current_ua: Mutex<usize>,
+    health: HealthMap,
 }
 
 impl ImageUploader {
@@ -34,22 +58,143 @@ impl ImageUploader {
         let mut shuffled = user_agents.clone();
         shuffled.shuffle(&mut rand::thread_rng());
 
+        // Initialise health map
+        let health = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut h = health.lock().unwrap();
+            for (name, _) in UPLOADERS {
+                h.insert(
+                    name.to_string(),
+                    UploaderHealth {
+                        is_healthy: true,
+                        last_latency: Duration::ZERO,
+                    },
+                );
+            }
+        }
+
+        // Spawn background health checker
+        let health_clone = health.clone();
+        tokio::spawn(async move {
+            let mut ticker = interval(HEALTH_CHECK_INTERVAL);
+            loop {
+                ticker.tick().await;
+                Self::update_health(health_clone.clone()).await;
+            }
+        });
+
+        // Load persistent cache from temp directory
+        let cache_file = std::env::temp_dir().join(CACHE_FILENAME);
+        let cache = Self::load_cache(&cache_file).unwrap_or_default();
+
         Self {
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(cache),
+            cache_file,
             user_agents: shuffled,
             current_ua: Mutex::new(0),
+            health,
+        }
+    }
+
+    fn load_cache(path: &Path) -> Option<HashMap<PathBuf, (String, SystemTime)>> {
+        let file = File::open(path).ok()?;
+        let reader = BufReader::new(file);
+        let mut map = HashMap::new();
+
+        for line in reader.lines() {
+            let line = line.ok()?;
+            let mut parts = line.split('\t');
+            let path_encoded = parts.next()?;
+            let url_encoded = parts.next()?;
+            let ts_str = parts.next()?;
+
+            let path_bytes = BASE64.decode(path_encoded).ok()?;
+            let url_bytes = BASE64.decode(url_encoded).ok()?;
+            let path_str = String::from_utf8(path_bytes).ok()?;
+            let url = String::from_utf8(url_bytes).ok()?;
+            let secs: u64 = ts_str.parse().ok()?;
+
+            let dur = Duration::from_secs(secs);
+            let timestamp = SystemTime::UNIX_EPOCH.checked_add(dur)?;
+            map.insert(PathBuf::from(path_str), (url, timestamp));
+        }
+        Some(map)
+    }
+
+    fn save_cache(&self) {
+        let cache = self.cache.lock().unwrap();
+        if let Ok(file) = File::create(&self.cache_file) {
+            let mut writer = BufWriter::new(file);
+            for (path, (url, timestamp)) in cache.iter() {
+                if let Ok(dur) = timestamp.duration_since(SystemTime::UNIX_EPOCH) {
+                    let secs = dur.as_secs();
+                    // Encoding to prevent formatting issues
+                    let path_encoded = BASE64.encode(path.to_string_lossy().as_bytes());
+                    let url_encoded = BASE64.encode(url.as_bytes());
+                    let line = format!("{}\t{}\t{}\n", path_encoded, url_encoded, secs);
+                    let _ = writer.write_all(line.as_bytes());
+                }
+            }
+        }
+    }
+
+    async fn update_health(health: HealthMap) {
+        let client = match Client::builder().timeout(PING_TIMEOUT).build() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to build health-check client: {}", e);
+                return;
+            }
+        };
+
+        for (name, _max_size) in UPLOADERS {
+            let url = match *name {
+                "litterbox" => "https://litterbox.catbox.moe/resources/internals/api.php",
+                "uguu" => "https://uguu.se",
+                "tmpfiles" => "https://tmpfiles.org",
+                _ => continue,
+            };
+
+            let start = Instant::now();
+            let result = client.head(url).send().await;
+            let latency = start.elapsed();
+            let is_healthy = result.is_ok();
+
+            if let Err(e) = result {
+                debug!("Health check for {name} failed: {e}");
+            }
+
+            let mut h = health.lock().unwrap();
+            h.insert(
+                name.to_string(),
+                UploaderHealth {
+                    is_healthy,
+                    last_latency: latency,
+                },
+            );
         }
     }
 
     pub async fn upload_local_file(&self, path: &Path) -> Option<String> {
+        let now = SystemTime::now();
         let cached_url = {
             let mut cache = self.cache.lock().unwrap();
             if let Some((url, timestamp)) = cache.get(path) {
-                if timestamp.elapsed() < CACHE_DURATION {
-                    Some(url.clone())
+                if let Ok(elapsed) = now.duration_since(*timestamp) {
+                    if elapsed < CACHE_DURATION {
+                        Some(url.clone())
+                    } else {
+                        tracing::debug!("Removing {} from cache", path.display());
+                        cache.remove(path);
+                        drop(cache); // release lock before save
+                        self.save_cache();
+                        None
+                    }
                 } else {
                     tracing::debug!("Removing {} from cache", path.display());
                     cache.remove(path);
+                    drop(cache);
+                    self.save_cache();
                     None
                 }
             } else {
@@ -58,7 +203,7 @@ impl ImageUploader {
         };
 
         if let Some(url) = cached_url {
-            tracing::debug!("Cache hit for {}", path.display());
+            tracing::debug!("Cache hit for {} (URL: {})", path.display(), url);
             return Some(url);
         }
 
@@ -84,10 +229,11 @@ impl ImageUploader {
         let url = self.upload_bytes(&bytes, &filename).await?;
 
         // Insert into cache with current time
-        self.cache
-            .lock()
-            .unwrap()
-            .insert(path.to_path_buf(), (url.clone(), Instant::now()));
+        {
+            let mut cache = self.cache.lock().unwrap();
+            cache.insert(path.to_path_buf(), (url.clone(), SystemTime::now()));
+        }
+        self.save_cache();
 
         debug!("Cached {} ({})", path.display(), url);
         Some(url)
@@ -95,27 +241,61 @@ impl ImageUploader {
 
     async fn upload_bytes(&self, bytes: &[u8], filename: &str) -> Option<String> {
         let ua = self.get_next_user_agent();
-        let client = Client::builder().user_agent(&ua).build().ok()?;
+        let client = Client::builder()
+            .user_agent(&ua)
+            .timeout(UPLOAD_TIMEOUT)
+            .build()
+            .ok()?;
 
-        // Try litterbox.catbox.moe
-        if bytes.len() <= 200 * 1024 * 1024
-            && let Some(url) = Self::upload_to_litterbox(&client, bytes, filename, "1h").await
-        {
-            return Some(url);
-        }
+        // Collect healthy uploaders
+        let health_snapshot: Vec<(String, UploaderHealth)> = {
+            let h = self.health.lock().unwrap();
+            UPLOADERS
+                .iter()
+                .filter_map(|&(name, max_size)| {
+                    if bytes.len() as u64 > max_size {
+                        return None;
+                    }
+                    h.get(name).map(|health| (name.to_string(), health.clone()))
+                })
+                .collect()
+        };
 
-        // Try uguu.se
-        if bytes.len() <= 128 * 1024 * 1024
-            && let Some(url) = Self::upload_to_uguu(&client, bytes, filename).await
-        {
-            return Some(url);
-        }
+        // Filter healthy ones and order by latency
+        let mut candidates: Vec<_> = health_snapshot
+            .into_iter()
+            .filter(|(_, h)| h.is_healthy)
+            .collect();
+        candidates.sort_by_key(|(_, h)| h.last_latency);
 
-        // Try tmpfiles.org
-        if bytes.len() <= 100 * 1024 * 1024
-            && let Some(url) = Self::upload_to_tmpfiles(&client, bytes, filename, "3600").await
-        {
-            return Some(url);
+        debug!(
+            "Candidates for upload ({} bytes): {:?}",
+            bytes.len(),
+            candidates
+                .iter()
+                .map(|(n, h)| format!("{n}({}ms)", h.last_latency.as_millis()))
+                .collect::<Vec<_>>()
+        );
+
+        for (name, _) in &candidates {
+            let result = match name.as_str() {
+                "litterbox" => Self::upload_to_litterbox(&client, bytes, filename, "1h").await,
+                "uguu" => Self::upload_to_uguu(&client, bytes, filename).await,
+                "tmpfiles" => Self::upload_to_tmpfiles(&client, bytes, filename, "3600").await,
+                _ => None,
+            };
+
+            if let Some(url) = result {
+                return Some(url);
+            }
+
+            // Mark as unhealthy
+            if let Ok(mut h) = self.health.lock()
+                && let Some(health) = h.get_mut(name)
+            {
+                health.is_healthy = false;
+                debug!("Marked {name} as unhealthy due to upload failure");
+            }
         }
 
         None

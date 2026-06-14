@@ -944,6 +944,7 @@ dependencies = [
 name = "mpd-discord-rpc"
 version = "1.11.0"
 dependencies = [
+ "base64",
  "dirs 5.0.1",
  "discord-presence",
  "lofty",
