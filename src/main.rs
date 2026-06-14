@@ -133,8 +133,8 @@ enum ServiceEvent {
 
 struct Service<'a> {
     config: &'a Config,
-    remote_client: AlbumArtClient,
-    local_client: LocalArtClient,
+    remote_client: Option<AlbumArtClient>,
+    local_client: Option<LocalArtClient>,
     drpc: DiscordClient,
     tokens: Tokens,
 }
@@ -186,8 +186,20 @@ impl<'a> Service<'a> {
         })
         .persist();
 
-        let remote_client = AlbumArtClient::new();
-        let local_client = LocalArtClient::new(config.music_directory.as_deref());
+        // Conditionally create clients based on config
+        let (remote_client, local_client) = match config.format.album_art {
+            config::AlbumArtMode::None => (None, None),
+            config::AlbumArtMode::Remote => (Some(AlbumArtClient::new()), None),
+            config::AlbumArtMode::Local => {
+                let local = LocalArtClient::new(config.music_directory.as_deref());
+                (None, Some(local))
+            }
+            config::AlbumArtMode::PreferLocal | config::AlbumArtMode::PreferRemote => {
+                let remote = Some(AlbumArtClient::new());
+                let local = LocalArtClient::new(config.music_directory.as_deref());
+                (remote, Some(local))
+            }
+        };
 
         Self {
             config,
@@ -263,24 +275,45 @@ impl<'a> Service<'a> {
                 let url = match format.album_art {
                     config::AlbumArtMode::None => None,
                     config::AlbumArtMode::Remote => {
-                        self.remote_client.get_album_art_url(song.clone()).await
+                        if let Some(client) = self.remote_client.as_mut() {
+                            client.get_album_art_url(song.clone()).await
+                        } else {
+                            None
+                        }
                     }
                     config::AlbumArtMode::Local => {
-                        self.local_client.get_album_art_url(song.clone()).await
+                        if let Some(client) = self.local_client.as_mut() {
+                            client.get_album_art_url(song.clone()).await
+                        } else {
+                            None
+                        }
                     }
                     config::AlbumArtMode::PreferLocal => {
-                        if let Some(url) = self.local_client.get_album_art_url(song.clone()).await {
-                            Some(url)
+                        let local_url = if let Some(client) = self.local_client.as_mut() {
+                            client.get_album_art_url(song.clone()).await
                         } else {
-                            self.remote_client.get_album_art_url(song.clone()).await
+                            None
+                        };
+                        if local_url.is_some() {
+                            local_url
+                        } else if let Some(client) = self.remote_client.as_mut() {
+                            client.get_album_art_url(song).await
+                        } else {
+                            None
                         }
                     }
                     config::AlbumArtMode::PreferRemote => {
-                        if let Some(url) = self.remote_client.get_album_art_url(song.clone()).await
-                        {
-                            Some(url)
+                        let remote_url = if let Some(client) = self.remote_client.as_mut() {
+                            client.get_album_art_url(song.clone()).await
                         } else {
-                            self.local_client.get_album_art_url(song).await
+                            None
+                        };
+                        if remote_url.is_some() {
+                            remote_url
+                        } else if let Some(client) = self.local_client.as_mut() {
+                            client.get_album_art_url(song).await
+                        } else {
+                            None
                         }
                     }
                 };
